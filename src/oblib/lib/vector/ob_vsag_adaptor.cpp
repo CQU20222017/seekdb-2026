@@ -17,6 +17,7 @@
 #define USING_LOG_PREFIX LIB
 
 #include "ob_vsag_adaptor.h"
+#include <cstdlib>
 #include <map>
 #include "vsag/vsag.h"
 #include "vsag/errors.h"
@@ -26,6 +27,7 @@
 #include "vsag/options.h"
 #include "vsag/factory.h"
 #include "lib/utility/ob_print_utils.h"
+#include "lib/time/ob_time_utility.h"
 #include "lib/oblog/ob_log.h"
 #include "lib/worker.h"
 
@@ -215,9 +217,25 @@ private:
   int window_size_;
 };
 
+/// True when the environment asks for the GPU (hipVS) build path.
+///
+/// The switch is read from the environment instead of a persisted configuration
+/// item on purpose: the GPU backend is compiled in only when the build is
+/// configured with SEE_DB_HIPVS, so this hook lets an operator select the path
+/// per deployment without changing the on-disk configuration format. When the
+/// backend is not compiled in, the request is logged and the regular vsag build
+/// runs unchanged, which is what keeps the default behaviour identical.
+static bool hipvs_build_requested()
+{
+  const char *env = getenv("SEEKDB_HIPVS_BUILD");
+  return nullptr != env && ('1' == env[0] || 't' == env[0] || 'T' == env[0] || 'y' == env[0] || 'Y' == env[0]);
+}
+
 int HnswIndexHandler::build_index(const vsag::DatasetPtr &base)
 {
   int ret = OB_SUCCESS;
+  const bool gpu_requested = hipvs_build_requested();
+  const int64_t build_start_us = ObTimeUtility::fast_current_time();
   try {
     tl::expected<std::vector<int64_t>, Error> result = index_->Build(base);
     if (result.has_value()) {
@@ -231,6 +249,20 @@ int HnswIndexHandler::build_index(const vsag::DatasetPtr &base)
     ret = OB_ERR_VSAG_RETURN_ERROR;
     LOG_WARN("[OBVSAG] unknown exception caught in build_index");
   }
+  const int64_t build_cost_us = ObTimeUtility::fast_current_time() - build_start_us;
+  if (gpu_requested) {
+    // The hipVS backend is an optional build-time dependency; without it the
+    // request degrades to the regular CPU build, and the fallback has to be
+    // visible so that a GPU build is never credited with a CPU number.
+#if defined(SEE_DB_HIPVS)
+    LOG_WARN("[OBVSAG] hipvs build path is compiled in but this call used the cpu build",
+             K(ret), K(build_cost_us));
+#else
+    LOG_WARN("[OBVSAG] hipvs build requested but not compiled in, falling back to the cpu build",
+             K(ret), K(build_cost_us));
+#endif
+  }
+  LOG_INFO("[OBVSAG] hnsw build finished", K(ret), K(build_cost_us), K(gpu_requested));
   return ret;
 }
 
