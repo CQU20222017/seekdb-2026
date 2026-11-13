@@ -80,3 +80,32 @@ C++ 实现（`amd/hipvs-hnsw/`）本机实测：20,000×128d 构建 **7.3 s**、
 | 5-6 | `amd-hipvs` | `14da97edc` / `f10b6f1fd` | 文档形态 + `competition/amd/` |
 | 7-8 | `2026-competition` | `5f03a375b` / `4844931a7` | 依赖容忍 + Makefile |
 | 9-11 | `2026-competition` | `2e873cf43` / `8a4db601d` | FTS 同位置入口 + 极简容器适配 |
+
+## 七、干净构建验证（新增）
+
+为排除"仓库在全新环境下编译失败"的可能，执行了与平台等价的流程：
+
+```text
+git clone --depth 1 --branch 2026-competition <repo> /tmp/fresh_clone
+cd /tmp/fresh_clone && ./build.sh release --make -j4
+→ build exit=0, elapsed=1174s (~19.6 min)
+→ build_release/src/observer/seekdb  1.3 GB, 可执行
+```
+
+结论：**仓库从零 clone 后可以完整编译通过**，不存在构建层面的阻塞。
+
+## 八、源码接入点（本轮新增）
+
+此前的 11 次提交只增加了 `amd/` 目录下的材料，**未修改 seekdb 源码**；而题目要求的是"优化 seekdb 的
+HNSW 索引构建链路"。本轮在真实构建入口补上了接入点：
+
+`src/oblib/lib/vector/ob_vsag_adaptor.cpp` 的 `HnswIndexHandler::build_index()`：
+
+- 记录每次 HNSW 构建的耗时（`build_cost_us`），输出 `[OBVSAG] hnsw build finished` 日志；
+- 读取 `SEEKDB_HIPVS_BUILD` 开关；开启且未编入 GPU 后端时，**显式记录回退**并继续走 CPU 构建，
+  保证 GPU 路径的耗时不会被 CPU 数字冒充（对应题目"回退不得计作加速"的约束）；
+- 开关未设置时行为与改动前完全一致（仅多两条日志）。
+
+该文件已用项目自带 clang-17 与真实编译参数做 `-fsyntax-only` 校验，无错误。
+
+提交：`3b64335fb7ce4ce93f475e6ebdc984331d60136d`
